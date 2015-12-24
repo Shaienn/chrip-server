@@ -3,3 +3,4 @@ ebin
 .rebar
 .idea
 *.dump
+*.iml
