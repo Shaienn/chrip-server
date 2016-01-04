@@ -23,5 +23,8 @@ start_link() ->
 %% ===================================================================
 
 init([]) ->
-    {ok, { {one_for_one, 5, 10}, []} }.
-
+    Children = [
+        ?CHILD(db, worker),
+        ?CHILD(approve_db, worker)
+    ],
+    {ok, {{one_for_one, 100, 10}, Children}}.

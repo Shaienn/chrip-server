@@ -1,37 +1,41 @@
 %%%-------------------------------------------------------------------
 %%% @author shaienn
-%%% @copyright (C) 2015, <COMPANY>
+%%% @copyright (C) 2016, <COMPANY>
 %%% @doc
 %%%
 %%% @end
-%%% Created : 24. Dec 2015 5:33
+%%% Created : 02. Jan 2016 12:04
 %%%-------------------------------------------------------------------
--module(client_protocol).
+-module(approve_db).
 -author("shaienn").
 
 -behaviour(gen_server).
--behavior(ranch_protocol).
+-include("include/chrip_header.hrl").
 
 %% API
--export([start_link/4]).
+-export([start_link/0]).
 
 %% gen_server callbacks
 -export([init/1,
-  init/4,
   handle_call/3,
   handle_cast/2,
   handle_info/2,
   terminate/2,
   code_change/3]).
 
--define(SERVER, ?MODULE).
--define(TIMEOUT, 5000).
+-export([add_song_for_approve/10]).
 
--record(state, {socket, transport}).
+-define(SERVER, ?MODULE).
+
+-record(state, {connection = null}).
 
 %%%===================================================================
 %%% API
 %%%===================================================================
+
+add_song_for_approve(Id, Gaid, Uaid, Gsid, Usid, SingerName, SongName, SongText, Mac, Ip) ->
+  gen_server:call(?MODULE, {add_song_for_approve, Id, Gaid, Uaid, Gsid, Usid, SingerName, SongName, SongText, Mac, Ip}, infinity).
+
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -39,12 +43,15 @@
 %%
 %% @end
 %%--------------------------------------------------------------------
-start_link(Ref, Socket, Transport, Opts) ->
-  proc_lib:start_link(?MODULE, init, [Ref, Socket, Transport, Opts]).
+-spec(start_link() ->
+  {ok, Pid :: pid()} | ignore | {error, Reason :: term()}).
+start_link() ->
+  gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
 
 %%%===================================================================
 %%% gen_server callbacks
 %%%===================================================================
+
 
 %%--------------------------------------------------------------------
 %% @private
@@ -60,16 +67,22 @@ start_link(Ref, Socket, Transport, Opts) ->
 -spec(init(Args :: term()) ->
   {ok, State :: #state{}} | {ok, State :: #state{}, timeout() | hibernate} |
   {stop, Reason :: term()} | ignore).
+
 init([]) ->
-  {ok, #state{}}.
+  io:format("approve init started~n"),
+  {ok, Connection} = case esqlite3:open(?APPROVEDBPATH, {readwrite}, 5000) of
+                       {ok, Conn} -> {ok, Conn};
+                       {error, {_, "unable to open database file"}} ->
+                         {ok, Conn} = esqlite3:open(?APPROVEDBPATH, 5000),
+                         ok = esqlite3:exec("begin;", Conn),
+                         ok = esqlite3:exec("create table need_approve(id INTEGER PRIMARY KEY AUTOINCREMENT, gaid INT, uaid INT, gsid INT, usid INT, singer_name VARCHAR(255), song_name VARCHAR(255), song_text TEXT, mac VARCHAR(18), ip VARCHAR(16));",
+                           Conn),
+                         ok = esqlite3:exec("commit;", Conn),
+                         {ok, Conn}
+                     end,
 
-
-init(Ref, Socket, Transport, _Opts = []) ->
-  ok = proc_lib:init_ack({ok, self()}),
-  %% Perform any required state initialization here.
-  ok = ranch:accept_ack(Ref),
-  ok = Transport:setopts(Socket, [{active, once}]),
-  gen_server:enter_loop(?MODULE, [], {state, Socket, Transport}).
+  error_logger:info_msg("Approve base opened: ~p~n", [Connection]),
+  {ok, #state{connection = Connection}}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -86,8 +99,30 @@ init(Ref, Socket, Transport, _Opts = []) ->
   {noreply, NewState :: #state{}, timeout() | hibernate} |
   {stop, Reason :: term(), Reply :: term(), NewState :: #state{}} |
   {stop, Reason :: term(), NewState :: #state{}}).
+
+handle_call({add_song_for_approve, Id, Gaid, Uaid, Gsid, Usid, SingerName, SongName, SongText, Mac, Ip}, _From, State) ->
+  case esqlite3:q("SELECT id FROM need_approve WHERE gaid=? AND uaid=? AND gsid=? AND usid=? AND mac=?",
+    [Gaid, Uaid, Gsid, Usid, Mac],
+    State#state.connection) of
+    [] ->
+      io:format("non existed~n"),
+      {ok, Statement} = esqlite3:prepare(
+        "INSERT INTO need_approve (gaid, uaid, gsid, usid, singer_name, song_name, song_text, mac, ip) VALUES(?,?,?,?,?,?,?,?,?)",
+        State#state.connection),
+      esqlite3:bind(Statement, [Gaid, Uaid, Gsid, Usid, SingerName, SongName, SongText, Mac, Ip]),
+      '$done' = esqlite3:step(Statement);
+    [{RowID}] ->
+      io:format("existed~n"),
+      {ok, Statement} = esqlite3:prepare(
+        "UPDATE need_approve SET singer_name=?, song_name=?, song_text=? WHERE id=?",
+        State#state.connection),
+      esqlite3:bind(Statement, [SingerName, SongName, SongText, RowID]),
+      '$done' = esqlite3:step(Statement)
+  end,
+{reply, {ok, Id}, State};
+
 handle_call(_Request, _From, State) ->
-  {reply, ok, State}.
+{reply, ok, State}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -117,23 +152,6 @@ handle_cast(_Request, State) ->
   {noreply, NewState :: #state{}} |
   {noreply, NewState :: #state{}, timeout() | hibernate} |
   {stop, Reason :: term(), NewState :: #state{}}).
-
-handle_info({tcp, Socket, Data}, State=#state{
-  socket=Socket, transport=Transport}) ->
-  io:format("Data: ~p~n", [Data]),
-%%  Transport:setopts(Socket, [{active, once}]),
-%%  Transport:send(Socket, reverse_binary(Data)),
-  {noreply, State, ?TIMEOUT};
-
-handle_info({tcp_closed, _Socket}, State) ->
-  {stop, normal, State};
-
-handle_info({tcp_error, _, Reason}, State) ->
-  {stop, Reason, State};
-
-handle_info(timeout, State) ->
-  {stop, normal, State};
-
 handle_info(_Info, State) ->
   {noreply, State}.
 

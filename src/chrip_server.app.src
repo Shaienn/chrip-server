@@ -6,7 +6,8 @@
   {applications, [
                   kernel,
                   stdlib,
-                  ranch
+                  ranch,
+                  esqlite
                  ]},
   {mod, { chrip_server_app, []}},
   {env, []}
